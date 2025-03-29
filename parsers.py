@@ -27,47 +27,77 @@ from io import BytesIO
 # #         yield Document(page_content=text, metadata={})
 
 class TableParser(BaseBlobParser, ABC):
+    def __init__(self, use_all_columns_as_keys=False):
+        """
+        Initialize the TableParser with configuration options.
+        
+        Args:
+            use_all_columns_as_keys (bool): If True, use all column values as keys.
+                                           If False (default), use only the first column values as keys.
+        """
+        self.use_all_columns_as_keys = use_all_columns_as_keys
 
     def lazy_parse(self, blob: Blob) -> Iterator[Document]:
-
         with blob.as_bytes_io() as file:
             if blob.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
                 # Read all sheets into a dictionary of dataframes
                 all_dfs = pd.read_excel(file, sheet_name=None, index_col=0)
                 
-                # Process each sheet and combine results
+                # Process only the last sheet instead of all sheets
                 result = {}
-                for sheet_name, df in all_dfs.items():
+                if all_dfs:
+                    # Get the last sheet name and dataframe
+                    sheet_name = list(all_dfs.keys())[-1]
+                    df = all_dfs[sheet_name]
+                    
                     # Reset index to make the index a regular column
                     df = df.reset_index()
                     
-                    # For each row, create entries using each column value as a key
+                    # Process each row in the dataframe
                     for _, row in df.iterrows():
                         row_dict = row.to_dict()  # Convert row to dictionary
                         row_dict['_sheet_name'] = sheet_name  # Add sheet name to metadata
                         
-                        # For each column in this row, create an entry using its value as key
-                        for col_name, value in row_dict.items():
-                            if pd.notna(value) and value not in result:  # Avoid NaN values and duplicates
-                                result[value] = row_dict
+                        if self.use_all_columns_as_keys:
+                            # Option 1: Use all column values as keys
+                            for col_name, value in row_dict.items():
+                                if pd.notna(value) and str(value) not in result:  # Avoid NaN values and duplicates
+                                    result[str(value)] = row_dict
+                        else:
+                            # Option 2: Use only the first column value as key
+                            if len(df.columns) > 0:
+                                key_column = df.columns[0]  # Get the first column name
+                                key_value = row_dict[key_column]
+                                if pd.notna(key_value):  # Avoid NaN values
+                                    result[str(key_value)] = row_dict
                 
             elif blob.mimetype == "text/csv":
+                # CSV files only have one sheet, so no changes needed here
                 df = pd.read_csv(file, index_col=0)
                 # Reset index to make the index a regular column
                 df = df.reset_index()
                 
-                # Create a flattened dictionary where any column value can be used as a key
+                # Create a dictionary based on configuration
                 result = {}
                 
-                # For each row, create entries using each column value as a key
+                # Process each row in the dataframe
                 for _, row in df.iterrows():
                     row_dict = row.to_dict()  # Convert row to dictionary
                     
-                    # For each column in this row, create an entry using its value as key
-                    for col_name, value in row_dict.items():
-                        if pd.notna(value) and value not in result:  # Avoid NaN values and duplicates
-                            result[value] = row_dict
+                    if self.use_all_columns_as_keys:
+                        # Option 1: Use all column values as keys
+                        for col_name, value in row_dict.items():
+                            if pd.notna(value) and str(value) not in result:  # Avoid NaN values and duplicates
+                                result[str(value)] = row_dict
+                    else:
+                        # Option 2: Use only the first column value as key
+                        if len(df.columns) > 0:
+                            key_column = df.columns[0]  # Get the first column name
+                            key_value = row_dict[key_column]
+                            if pd.notna(key_value):  # Avoid NaN values
+                                result[str(key_value)] = row_dict
             
+        # Return the document with the processed content
         yield Document(page_content=json.dumps(result), metadata={})
 
 class PowerPointParser(BaseBlobParser, ABC):
