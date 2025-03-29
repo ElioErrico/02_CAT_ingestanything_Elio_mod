@@ -5,7 +5,6 @@ from cat.mad_hatter.decorators import hook
 
 # from .parsers import YoutubeParser, TableParser, JSONParser
 from .parsers import TableParser
-from .parsers import JSONParser
 
 @hook
 def rabbithole_instantiates_parsers(file_handlers: dict, cat) -> dict:
