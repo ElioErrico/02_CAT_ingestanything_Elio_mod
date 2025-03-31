@@ -3,3 +3,4 @@ pytube
 pandas>=1.3.0
 python-pptx>=0.6.21
 extract-msg>=0.28.0
+openpyxl

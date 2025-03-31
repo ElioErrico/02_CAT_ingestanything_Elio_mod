@@ -26,78 +26,81 @@ from io import BytesIO
 
 # #         yield Document(page_content=text, metadata={})
 
-class TableParser(BaseBlobParser, ABC):
-    def __init__(self, use_all_columns_as_keys=False):
-        """
-        Initialize the TableParser with configuration options.
+def process_dataframe(df, sheet_name=None, use_all_columns_as_keys=False):
+    """
+    Process a dataframe and convert it to a dictionary based on configuration.
+    
+    Args:
+        df (pd.DataFrame/dict): The dataframe(s) to process
+        sheet_name (str, optional): Name of the sheet or "all" for all sheets
+        use_all_columns_as_keys (bool): Whether to use all column values as keys
         
-        Args:
-            use_all_columns_as_keys (bool): If True, use all column values as keys.
-                                           If False (default), use only the first column values as keys.
-        """
+    Returns:
+        dict: Processed data as a dictionary
+    """
+    def process_single_sheet(df, sheet_name):
+        # Remove leading empty columns
+        df = df.dropna(axis=1, how='all').reset_index(drop=True)
+        df = df.loc[:, df.notna().any(axis=0)]  # Remove completely empty columns
+        
+        result = {}
+        for _, row in df.iterrows():
+            row_dict = row.to_dict()
+            
+            if sheet_name and sheet_name != "all":
+                row_dict['_sheet_name'] = sheet_name
+            
+            # Clean cell values removing leading/trailing dots
+            cleaned_row = {
+                k: str(v).strip('.') if isinstance(v, str) else v 
+                for k, v in row_dict.items()
+            }
+            
+            if use_all_columns_as_keys:
+                for col_name, value in cleaned_row.items():
+                    if pd.notna(value):
+                        key = f"{sheet_name}_{value}" if sheet_name else value
+                        result[key] = cleaned_row
+            else:
+                if len(df.columns) > 0:
+                    first_col = df.columns[0]
+                    key_value = cleaned_row.get(first_col)
+                    if pd.notna(key_value):
+                        key = f"{sheet_name}_{key_value}" if sheet_name else key_value
+                        result[key] = cleaned_row
+        return result
+
+    # Handle multiple sheets case
+    if sheet_name == "all":
+        final_result = {}
+        for sheet, sheet_df in df.items():
+            final_result.update(process_single_sheet(sheet_df, sheet))
+        return final_result
+        
+    # Handle single sheet case
+    return process_single_sheet(df, sheet_name)
+
+class TableParser(BaseBlobParser, ABC):
+    def __init__(self, use_all_columns_as_keys=False, process_all_sheets=True):
         self.use_all_columns_as_keys = use_all_columns_as_keys
+        self.process_all_sheets = process_all_sheets
 
     def lazy_parse(self, blob: Blob) -> Iterator[Document]:
         with blob.as_bytes_io() as file:
             if blob.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-                # Read all sheets into a dictionary of dataframes
                 all_dfs = pd.read_excel(file, sheet_name=None, index_col=0)
-                
-                # Process only the last sheet instead of all sheets
-                result = {}
-                if all_dfs:
-                    # Get the last sheet name and dataframe
-                    sheet_name = list(all_dfs.keys())[-1]
-                    df = all_dfs[sheet_name]
-                    
-                    # Reset index to make the index a regular column
-                    df = df.reset_index()
-                    
-                    # Process each row in the dataframe
-                    for _, row in df.iterrows():
-                        row_dict = row.to_dict()  # Convert row to dictionary
-                        row_dict['_sheet_name'] = sheet_name  # Add sheet name to metadata
-                        
-                        if self.use_all_columns_as_keys:
-                            # Option 1: Use all column values as keys
-                            for col_name, value in row_dict.items():
-                                if pd.notna(value) and str(value) not in result:  # Avoid NaN values and duplicates
-                                    result[str(value)] = row_dict
-                        else:
-                            # Option 2: Use only the first column value as key
-                            if len(df.columns) > 0:
-                                key_column = df.columns[0]  # Get the first column name
-                                key_value = row_dict[key_column]
-                                if pd.notna(key_value):  # Avoid NaN values
-                                    result[str(key_value)] = row_dict
-                
+                result = process_dataframe(
+                    all_dfs if self.process_all_sheets else list(all_dfs.values())[-1],
+                    sheet_name="all" if self.process_all_sheets else list(all_dfs.keys())[-1],
+                    use_all_columns_as_keys=self.use_all_columns_as_keys
+                )
             elif blob.mimetype == "text/csv":
-                # CSV files only have one sheet, so no changes needed here
                 df = pd.read_csv(file, index_col=0)
-                # Reset index to make the index a regular column
-                df = df.reset_index()
-                
-                # Create a dictionary based on configuration
-                result = {}
-                
-                # Process each row in the dataframe
-                for _, row in df.iterrows():
-                    row_dict = row.to_dict()  # Convert row to dictionary
-                    
-                    if self.use_all_columns_as_keys:
-                        # Option 1: Use all column values as keys
-                        for col_name, value in row_dict.items():
-                            if pd.notna(value) and str(value) not in result:  # Avoid NaN values and duplicates
-                                result[str(value)] = row_dict
-                    else:
-                        # Option 2: Use only the first column value as key
-                        if len(df.columns) > 0:
-                            key_column = df.columns[0]  # Get the first column name
-                            key_value = row_dict[key_column]
-                            if pd.notna(key_value):  # Avoid NaN values
-                                result[str(key_value)] = row_dict
+                result = process_dataframe(
+                    df,
+                    use_all_columns_as_keys=self.use_all_columns_as_keys
+                )
             
-        # Return the document with the processed content
         yield Document(page_content=json.dumps(result), metadata={})
 
 class PowerPointParser(BaseBlobParser, ABC):

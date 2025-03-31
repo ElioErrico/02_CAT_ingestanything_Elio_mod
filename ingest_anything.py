@@ -28,7 +28,7 @@ def rabbithole_instantiates_parsers(file_handlers: dict, cat) -> dict:
         # Email file formats
         "message/rfc822": EmailParser(),  # .eml
         "application/vnd.ms-outlook": EmailParser(),  # .msg
-        "application/octet-stream": EmailParser()  # Sometimes used for email files
+        "application/octet-stream": EmailParser(),  # Sometimes used for email files 
         
         # "video/mp4": YoutubeParser(),
         # "text/x-python": LanguageParser(language="python"),
