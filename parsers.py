@@ -26,82 +26,27 @@ from io import BytesIO
 
 # #         yield Document(page_content=text, metadata={})
 
-def process_dataframe(df, sheet_name=None, use_all_columns_as_keys=False):
-    """
-    Process a dataframe and convert it to a dictionary based on configuration.
-    
-    Args:
-        df (pd.DataFrame/dict): The dataframe(s) to process
-        sheet_name (str, optional): Name of the sheet or "all" for all sheets
-        use_all_columns_as_keys (bool): Whether to use all column values as keys
-        
-    Returns:
-        dict: Processed data as a dictionary
-    """
-    def process_single_sheet(df, sheet_name):
-        # Remove leading empty columns
-        df = df.dropna(axis=1, how='all').reset_index(drop=True)
-        df = df.loc[:, df.notna().any(axis=0)]  # Remove completely empty columns
-        
-        result = {}
-        for _, row in df.iterrows():
-            row_dict = row.to_dict()
-            
-            if sheet_name and sheet_name != "all":
-                row_dict['_sheet_name'] = sheet_name
-            
-            # Clean cell values removing leading/trailing dots
-            cleaned_row = {
-                k: str(v).strip('.') if isinstance(v, str) else v 
-                for k, v in row_dict.items()
-            }
-            
-            if use_all_columns_as_keys:
-                for col_name, value in cleaned_row.items():
-                    if pd.notna(value):
-                        key = f"{sheet_name}_{value}" if sheet_name else value
-                        result[key] = cleaned_row
-            else:
-                if len(df.columns) > 0:
-                    first_col = df.columns[0]
-                    key_value = cleaned_row.get(first_col)
-                    if pd.notna(key_value):
-                        key = f"{sheet_name}_{key_value}" if sheet_name else key_value
-                        result[key] = cleaned_row
-        return result
-
-    # Handle multiple sheets case
-    if sheet_name == "all":
-        final_result = {}
-        for sheet, sheet_df in df.items():
-            final_result.update(process_single_sheet(sheet_df, sheet))
-        return final_result
-        
-    # Handle single sheet case
-    return process_single_sheet(df, sheet_name)
-
 class TableParser(BaseBlobParser, ABC):
-    def __init__(self, use_all_columns_as_keys=False, process_all_sheets=True):
-        self.use_all_columns_as_keys = use_all_columns_as_keys
-        self.process_all_sheets = process_all_sheets
 
     def lazy_parse(self, blob: Blob) -> Iterator[Document]:
         with blob.as_bytes_io() as file:
             if blob.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-                all_dfs = pd.read_excel(file, sheet_name=None, index_col=0)
-                result = process_dataframe(
-                    all_dfs if self.process_all_sheets else list(all_dfs.values())[-1],
-                    sheet_name="all" if self.process_all_sheets else list(all_dfs.keys())[-1],
-                    use_all_columns_as_keys=self.use_all_columns_as_keys
-                )
+
+                # Read the Excel file - df is a dictionary of DataFrames (one per sheet)
+                df_dict = pd.read_excel(file, sheet_name=None)
+                all_records = []
+                # Process each sheet
+                for sheet_name, sheet_df in df_dict.items():
+                    # Convert each sheet's DataFrame to records and add to our list
+                    sheet_records = sheet_df.to_dict("records")
+                    all_records.extend(sheet_records)
+
             elif blob.mimetype == "text/csv":
-                df = pd.read_csv(file, index_col=0)
-                result = process_dataframe(
-                    df,
-                    use_all_columns_as_keys=self.use_all_columns_as_keys
-                )
+                # For CSV files, use read_csv instead of read_excel
+                df = pd.read_csv(file)
+                all_records = df.to_dict("records")
             
-        yield Document(page_content=json.dumps(result), metadata={})
+        yield Document(page_content=json.dumps(all_records), metadata={})
 
 class PowerPointParser(BaseBlobParser, ABC):
     
