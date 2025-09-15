@@ -1,11 +1,12 @@
 from langchain.document_loaders.parsers.language.language_parser import LanguageParser
-from langchain.document_loaders.parsers.msword import MsWordParser
+# from langchain.document_loaders.parsers.msword import MsWordParser
 
 from cat.mad_hatter.decorators import hook
 import random
 
 # from .parsers import YoutubeParser, TableParser, JSONParser
-from .parsers import TableParser, PowerPointParser, EmailParser
+from .parsers import TableParser, PowerPointParser
+# from .parsers import EmailParser
 
 @hook
 def rabbithole_instantiates_parsers(file_handlers: dict, cat) -> dict:
@@ -16,19 +17,21 @@ def rabbithole_instantiates_parsers(file_handlers: dict, cat) -> dict:
         "text/csv": TableParser(),
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": TableParser(),
 
-        # Word file formats
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": MsWordParser(),
-        "application/msword": MsWordParser(),
+        # # Word file formats
+        # "application/vnd.openxmlformats-officedocument.wordprocessingml.document": MsWordParser(),
+        # "application/msword": MsWordParser(),
         
         # PowerPoint file formats
         "application/vnd.openxmlformats-officedocument.presentationml.presentation": PowerPointParser(),  # .pptx
         "application/vnd.ms-powerpoint": PowerPointParser(),  # .ppt
         "application/powerpoint": PowerPointParser(),  # Alternative .ppt
 
-        # Email file formats
-        "message/rfc822": EmailParser(),  # .eml
-        "application/vnd.ms-outlook": EmailParser(),  # .msg
-        "application/octet-stream": EmailParser(),  # Sometimes used for email files 
+        # # Email file formats
+        # "message/rfc822": EmailParser(),        # .eml
+        # "application/vnd.ms-outlook": EmailParser(),  # .msg
+        # "application/octet-stream": EmailParser(),    # a volte .eml/.msg
+        # # facoltativo:
+        # "application/x-ole-storage": EmailParser(),   # alcuni .msg
         
         # "video/mp4": YoutubeParser(),
         # "text/x-python": LanguageParser(language="python"),
@@ -53,3 +56,7 @@ def before_rabbithole_insert_memory(doc, cat):
     random_message = random.choice(feedback_messages)
     cat.send_ws_message(random_message)
     return doc
+
+@hook  # default priority = 1
+def after_rabbithole_stored_documents(source, stored_points, cat):
+    cat.send_ws_message("`Document uploaded !`","chat")

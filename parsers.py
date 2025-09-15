@@ -1,222 +1,307 @@
+import os
+import json
+from typing import Iterator
+from abc import ABC
 
-# # from pytube import extract
-# # from youtube_transcript_api import YouTubeTranscriptApi
-# # from youtube_transcript_api.formatters import TextFormatter, JSONFormatter
-
+import pandas as pd
 from langchain_core.documents import Document
 from langchain_community.document_loaders.base import BaseBlobParser
 from langchain_community.document_loaders.blob_loaders import Blob
 
-import pandas as pd
-import json
-from typing import Iterator
-from abc import ABC
-import pptx
-from io import BytesIO
-
-# # class YoutubeParser(BaseBlobParser, ABC):
-# #     def __init__(self):
-# #         self.formatter = TextFormatter()
-
-# #     def lazy_parse(self, blob: Blob) -> Iterator[Document]:
-# #         video_id = extract.video_id(blob.source)
-
-# #         transcript = YouTubeTranscriptApi.get_transcripts([video_id], languages=["en", "it"], preserve_formatting=True)
-# #         text = self.formatter.format_transcript(transcript[0][video_id])
-
-# #         yield Document(page_content=text, metadata={})
 
 class TableParser(BaseBlobParser, ABC):
+    """Parsa CSV/XLSX. Per XLSX emette 1 Document per foglio."""
+
+    def _get_source(self, blob: Blob) -> str:
+        p = getattr(blob, "path", None) or getattr(blob, "source", None) or ""
+        try:
+            return os.path.basename(p) if p else ""
+        except Exception:
+            return str(p)
 
     def lazy_parse(self, blob: Blob) -> Iterator[Document]:
         with blob.as_bytes_io() as file:
             if blob.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
-
-                # Read the Excel file - df is a dictionary of DataFrames (one per sheet)
+                # Un Document per sheet
                 df_dict = pd.read_excel(file, sheet_name=None)
-                all_records = []
-                # Process each sheet
                 for sheet_name, sheet_df in df_dict.items():
-                    # Convert each sheet's DataFrame to records and add to our list
-                    sheet_records = sheet_df.to_dict("records")
-                    all_records.extend(sheet_records)
+                    if sheet_df is None or sheet_df.empty:
+                        continue
+                    records = sheet_df.to_dict("records")
+                    # opzionale: traccia la provenienza riga->foglio
+                    for r in records:
+                        r.setdefault("_sheet", sheet_name)
+
+                    yield Document(
+                        page_content=json.dumps(records, ensure_ascii=False),
+                        metadata={
+                            "source": self._get_source(blob),
+                            "mimetype": blob.mimetype,
+                            "sheet_name": sheet_name,
+                            "row_count": len(records),
+                            "parser": "TableParser",
+                        },
+                    )
 
             elif blob.mimetype == "text/csv":
-                # For CSV files, use read_csv instead of read_excel
                 df = pd.read_csv(file)
-                all_records = df.to_dict("records")
-            
-        yield Document(page_content=json.dumps(all_records), metadata={})
+                records = df.to_dict("records") if not df.empty else []
+                for r in records:
+                    r.setdefault("_sheet", "CSV")
+
+                yield Document(
+                    page_content=json.dumps(records, ensure_ascii=False),
+                    metadata={
+                        "source": self._get_source(blob),
+                        "mimetype": blob.mimetype,
+                        "sheet_name": "CSV",
+                        "row_count": len(records),
+                        "parser": "TableParser",
+                    },
+                )
+            else:
+                raise ValueError(f"Unsupported table mime type: {blob.mimetype}")
+
 
 class PowerPointParser(BaseBlobParser, ABC):
-    
+    """Estrae il testo dalle slide e include metadati utili."""
+
+    def _get_source(self, blob: Blob) -> str:
+        p = getattr(blob, "path", None) or getattr(blob, "source", None) or ""
+        try:
+            return os.path.basename(p) if p else ""
+        except Exception:
+            return str(p)
+
     def lazy_parse(self, blob: Blob) -> Iterator[Document]:
-        # Accept multiple PowerPoint MIME types
         pptx_mime_types = [
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",  # .pptx
             "application/vnd.ms-powerpoint",  # .ppt
-            "application/powerpoint"  # Alternative for .ppt
+            "application/powerpoint",  # Alternative .ppt
         ]
-        
         if blob.mimetype not in pptx_mime_types:
             raise ValueError(f"Unsupported mime type: {blob.mimetype}")
-        
+
         with blob.as_bytes_io() as file_obj:
-            presentation = pptx.Presentation(file_obj)
-            
-            # Extract text from all slides
+            import pptx as _pptx
+
+            presentation = _pptx.Presentation(file_obj)
+
             all_text = []
             slide_contents = {}
-            
+
             for i, slide in enumerate(presentation.slides, 1):
                 slide_text = []
-                
-                # Get slide title if available
                 title = ""
+
+                # Title (se presente)
                 for shape in slide.shapes:
-                    # Check if shape has text attribute and if it's a title shape
-                    if hasattr(shape, "text") and hasattr(shape, "is_title") and shape.is_title:
-                        title = shape.text
+                    if hasattr(shape, "text") and getattr(shape, "is_title", False):
+                        title = shape.text or ""
                         break
-                
-                # Extract text from all shapes in the slide
+
+                # Tutti i testi della slide
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text:
                         slide_text.append(shape.text)
-                
-                # Join all text from this slide
+
                 slide_content = "\n".join(slide_text)
                 all_text.append(slide_content)
-                
-                # Add to slide_contents dictionary
-                slide_contents[f"Slide {i}"] = {
-                    "title": title,
-                    "content": slide_content
-                }
-            
-            # Join all text from all slides
+                slide_contents[f"Slide {i}"] = {"title": title, "content": slide_content}
+
             full_text = "\n\n".join(all_text)
-            
-            yield Document(page_content=full_text, metadata={"slide_contents": slide_contents})
 
-class EmailParser(BaseBlobParser, ABC):
-    
-    def lazy_parse(self, blob: Blob) -> Iterator[Document]:
-        # Accept email MIME types
-        email_mime_types = [
-            "message/rfc822",  # .eml
-            "application/vnd.ms-outlook",  # .msg
-            "application/octet-stream"  # Sometimes used for email files
-        ]
-        
-        if blob.mimetype not in email_mime_types and not (blob.path.lower().endswith('.eml') or blob.path.lower().endswith('.msg')):
-            raise ValueError(f"Unsupported mime type: {blob.mimetype}")
-        
-        with blob.as_bytes_io() as file_obj:
-            # For .eml files (RFC822 format)
-            if blob.mimetype == "message/rfc822" or blob.path.lower().endswith('.eml'):
-                import email
-                from email import policy
-                
-                try:
-                    from bs4 import BeautifulSoup
-                    has_bs4 = True
-                except ImportError:
-                    has_bs4 = False
-                
-                # Parse the email
-                msg = email.message_from_binary_file(file_obj, policy=policy.default)
-                
-                # Extract only essential headers
-                subject = msg.get("Subject", "")
-                sender = msg.get("From", "")
-                recipients = msg.get("To", "")
-                cc = msg.get("Cc", "")
-                
-                # Extract body content
-                body = ""
-                
-                # Handle multipart messages
-                if msg.is_multipart():
-                    for part in msg.iter_parts():
-                        content_type = part.get_content_type()
-                        if content_type == "text/plain":
-                            body += part.get_content() + "\n\n"
-                        elif content_type == "text/html" and not body and has_bs4:
-                            # Extract text from HTML content
-                            html_content = part.get_content()
-                            soup = BeautifulSoup(html_content, 'html.parser')
-                            body += soup.get_text(separator='\n') + "\n\n"
-                else:
-                    # Handle single part messages
-                    content_type = msg.get_content_type()
-                    if content_type == "text/plain":
-                        body = msg.get_content()
-                    elif content_type == "text/html" and has_bs4:
-                        html_content = msg.get_content()
-                        soup = BeautifulSoup(html_content, 'html.parser')
-                        body = soup.get_text(separator='\n')
-            
-            # For .msg files (Outlook format)
-            elif blob.mimetype == "application/vnd.ms-outlook" or blob.path.lower().endswith('.msg'):
-                import extract_msg
-                
-                # Reset file pointer to beginning
-                file_obj.seek(0)
-                
-                # Save to a temporary file since extract_msg needs a file path
-                import tempfile
-                import os
-                
-                with tempfile.NamedTemporaryFile(delete=False) as temp:
-                    temp.write(file_obj.read())
-                    temp_path = temp.name
-                
-                try:
-                    # Parse the .msg file
-                    outlook_msg = extract_msg.Message(temp_path)
-                    
-                    # Extract only essential information
-                    subject = outlook_msg.subject
-                    sender = outlook_msg.sender
-                    recipients = outlook_msg.to
-                    cc = outlook_msg.cc
-                    
-                    # Extract body
-                    body = outlook_msg.body
-                    
-                    # Close the message
-                    outlook_msg.close()
-                finally:
-                    # Clean up the temporary file
-                    os.unlink(temp_path)
-            else:
-                raise ValueError(f"Unsupported email format: {blob.mimetype}")
-            
-            # Format the essential content in a clean, readable format
-            email_parts = []
-            if sender:
-                email_parts.append(f"Da: {sender}")
-            if recipients:
-                email_parts.append(f"A: {recipients}")
-            if cc:
-                email_parts.append(f"CC: {cc}")
-            if subject:
-                email_parts.append(f"Oggetto: {subject}")
-            if body:
-                email_parts.append("\n" + body)
-            
-            # Join all parts with newlines
-            full_content = "\n".join(email_parts)
-            
-            yield Document(page_content=full_content, metadata={})
+            yield Document(
+                page_content=full_text,
+                metadata={
+                    "source": self._get_source(blob),
+                    "mimetype": blob.mimetype,
+                    "parser": "PowerPointParser",
+                },
+            )
 
-# class JSONParser(BaseBlobParser, ABC):
+
+# class EmailParser(BaseBlobParser, ABC):
+#     """Parsa .eml/.msg mantenendo header essenziali, body pulito e info allegati."""
+
+#     def _get_source(self, blob: Blob) -> str:
+#         p = getattr(blob, "path", None) or getattr(blob, "source", None) or ""
+#         try:
+#             return os.path.basename(p) if p else ""
+#         except Exception:
+#             return str(p)
+
+#     def _html_to_text(self, html: str) -> str:
+#         if not html:
+#             return ""
+#         try:
+#             from bs4 import BeautifulSoup
+#             return BeautifulSoup(html, "html.parser").get_text(separator="\n")
+#         except Exception:
+#             # Fallback leggero senza bs4
+#             import re, html as _html
+#             text = re.sub(r"(?is)<(script|style).*?>.*?(</\1>)", "", html)
+#             text = re.sub(r"(?s)<br\s*/?>", "\n", text)
+#             text = re.sub(r"(?s)</p\s*>", "\n\n", text)
+#             text = re.sub(r"(?s)<.*?>", "", text)
+#             return _html.unescape(text)
+
+#     def _normalize(self, s: str) -> str:
+#         return (s or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
 #     def lazy_parse(self, blob: Blob) -> Iterator[Document]:
+#         email_mime_types = [
+#             "message/rfc822",                 # .eml
+#             "application/vnd.ms-outlook",     # .msg
+#             "application/octet-stream",       # talvolta .eml/.msg
+#             "application/x-ole-storage",      # alcuni .msg
+#         ]
 
-#         with blob.as_bytes_io() as file:
-#             text = json.load(file)
+#         path_lower = ((blob.path or getattr(blob, "source", "")) or "").lower()
+#         is_eml = (blob.mimetype == "message/rfc822") or path_lower.endswith(".eml")
+#         is_msg = (blob.mimetype in ("application/vnd.ms-outlook", "application/x-ole-storage")) or path_lower.endswith(".msg")
 
-#         yield Document(page_content=text, metadata={})
+#         if not (blob.mimetype in email_mime_types or is_eml or is_msg):
+#             raise ValueError(f"Unsupported mime type: {blob.mimetype}")
+
+#         with blob.as_bytes_io() as file_obj:
+#             sender = recipients = cc = bcc = subject = date_str = ""
+#             body_text = ""
+#             attachments_meta = []
+
+#             if is_eml:
+#                 import email
+#                 from email import policy
+
+#                 msg = email.message_from_binary_file(file_obj, policy=policy.default)
+#                 subject = self._normalize(msg.get("Subject", ""))
+#                 sender = self._normalize(msg.get("From", ""))
+#                 recipients = self._normalize(msg.get("To", ""))
+#                 cc = self._normalize(msg.get("Cc", ""))
+#                 bcc = self._normalize(msg.get("Bcc", ""))
+#                 date_str = self._normalize(msg.get("Date", ""))
+
+#                 if msg.is_multipart():
+#                     # preferisci text/plain; se assente, ripulisci l'HTML
+#                     for part in msg.iter_parts():
+#                         disp = (part.get("Content-Disposition") or "").lower()
+#                         ctype = (part.get_content_type() or "").lower()
+#                         if "attachment" in disp:
+#                             fname = part.get_filename() or ""
+#                             try:
+#                                 payload = part.get_content()
+#                                 size = len(payload.encode("utf-8")) if isinstance(payload, str) else len(payload or b"")
+#                             except Exception:
+#                                 size = None
+#                             attachments_meta.append({"filename": fname, "content_type": ctype, "size": size})
+#                             continue
+#                         if ctype == "text/plain" and not body_text:
+#                             body_text = self._normalize(part.get_content())
+#                         elif ctype == "text/html" and not body_text:
+#                             body_text = self._normalize(self._html_to_text(part.get_content()))
+#                 else:
+#                     ctype = (msg.get_content_type() or "").lower()
+#                     if ctype == "text/plain":
+#                         body_text = self._normalize(msg.get_content())
+#                     elif ctype == "text/html":
+#                         body_text = self._normalize(self._html_to_text(msg.get_content()))
+
+#             elif is_msg:
+#                 # Outlook .msg via extract_msg richiede un path temporaneo
+#                 import tempfile
+#                 import os as _os
+#                 try:
+#                     import extract_msg
+#                 except ImportError as e:
+#                     raise ImportError("Per leggere .msg serve il pacchetto 'extract_msg'.") from e
+
+#                 file_obj.seek(0)
+#                 with tempfile.NamedTemporaryFile(delete=False) as temp:
+#                     temp.write(file_obj.read())
+#                     temp_path = temp.name
+
+#                 try:
+#                     msg = extract_msg.Message(temp_path)
+#                     msg.populate()  # assicura che i campi siano caricati
+
+#                     subject = self._normalize(getattr(msg, "subject", "") or "")
+#                     sender = self._normalize(getattr(msg, "sender", "") or getattr(msg, "sender", ""))
+#                     recipients = self._normalize(getattr(msg, "to", "") or "")
+#                     cc = self._normalize(getattr(msg, "cc", "") or "")
+#                     bcc = self._normalize(getattr(msg, "bcc", "") or "")
+#                     date_obj = getattr(msg, "date", None)
+#                     date_str = self._normalize(str(date_obj)) if date_obj else ""
+
+#                     # Ordine di preferenza: body (plain) -> htmlBody -> rtfBody
+#                     plain = getattr(msg, "body", "") or ""
+#                     html = getattr(msg, "htmlBody", "") or ""
+#                     rtf = getattr(msg, "rtfBody", "") or ""
+
+#                     if plain.strip():
+#                         body_text = self._normalize(plain)
+#                     elif html.strip():
+#                         body_text = self._normalize(self._html_to_text(html))
+#                     elif rtf.strip():
+#                         try:
+#                             from striprtf.striprtf import rtf_to_text
+#                             body_text = self._normalize(rtf_to_text(rtf))
+#                         except Exception:
+#                             body_text = self._normalize(rtf)
+
+#                     # Allegati
+#                     atts = getattr(msg, "attachments", []) or []
+#                     for att in atts:
+#                         # extract_msg Attachment object
+#                         fname = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None) or ""
+#                         try:
+#                             data = getattr(att, "data", None)
+#                             size = len(data) if data is not None else None
+#                         except Exception:
+#                             size = None
+#                         attachments_meta.append({
+#                             "filename": fname,
+#                             "content_type": None,
+#                             "size": size,
+#                         })
+
+#                     msg.close()
+#                 finally:
+#                     _os.unlink(temp_path)
+#             else:
+#                 raise ValueError(f"Unsupported email format: {blob.mimetype}")
+
+#             # Componi il testo finale (header + body)
+#             parts = []
+#             if sender:
+#                 parts.append(f"Da: {sender}")
+#             if recipients:
+#                 parts.append(f"A: {recipients}")
+#             if cc:
+#                 parts.append(f"CC: {cc}")
+#             if bcc:
+#                 parts.append(f"BCC: {bcc}")
+#             if date_str:
+#                 parts.append(f"Data: {date_str}")
+#             if subject:
+#                 parts.append(f"Oggetto: {subject}")
+#             if body_text:
+#                 parts.append("\n" + body_text)
+
+#             # Riassunto allegati in coda (opzionale, utile all'indicizzazione)
+#             if attachments_meta:
+#                 parts.append("\n-- Allegati --")
+#                 for a in attachments_meta:
+#                     size_str = f" ({a['size']} bytes)" if a.get("size") else ""
+#                     parts.append(f"- {a.get('filename','')}"+size_str)
+
+#             full_content = "\n".join(parts)
+
+#             yield Document(
+#                 page_content=full_content,
+#                 metadata={
+#                     "source": self._get_source(blob),
+#                     "mimetype": blob.mimetype,
+#                     "parser": "EmailParser"
+#                 },
+#             )
 
